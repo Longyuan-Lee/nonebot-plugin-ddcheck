@@ -19,6 +19,7 @@ from .data_source import (
     get_user_info,
     get_vtb_list,
     render_ddcheck_image,
+    get_user_attentions,
 )
 
 __plugin_meta__ = PluginMetadata(
@@ -34,7 +35,6 @@ __plugin_meta__ = PluginMetadata(
     },
 )
 
-
 ddcheck = on_alconna(
     Alconna(
         "查成分",
@@ -46,6 +46,17 @@ ddcheck = on_alconna(
     priority=12,
 )
 
+# 新增一个用于获取关注列表的命令
+ddcheck_follows = on_alconna(
+    Alconna(
+        "查关注",
+        Args["name#B站UID或用户名", str],
+        meta=CommandMeta(description="查询B站用户关注列表，返回UID列表"),
+    ),
+    use_cmd_start=True,
+    block=True,
+    priority=12,
+)
 
 @ddcheck.handle()
 async def _(matcher: Matcher, name: str):
@@ -55,7 +66,7 @@ async def _(matcher: Matcher, name: str):
         try:
             uid = await get_uid_by_name(name)
         except Exception:
-            logger.warning(traceback.format_exc())
+            logger.error(traceback.format_exc())
             await matcher.finish("获取用户信息失败，请检查名称或使用uid查询")
 
         if not uid:
@@ -64,13 +75,20 @@ async def _(matcher: Matcher, name: str):
     try:
         user_info = await get_user_info(uid)
     except Exception:
-        logger.warning(traceback.format_exc())
+        logger.error(traceback.format_exc())
         await matcher.finish("获取用户信息失败，请检查名称或稍后再试")
+    
+    if not isinstance(user_info, dict) or "attention" not in user_info:
+        logger.error(f"从API获取的用户信息格式不正确: {user_info}")
+        await matcher.finish("获取用户信息失败，返回数据格式异常。")
 
-    attentions = user_info.get("attentions", [])
+    # 注意，这里我们仍然只传递UID列表
+    attentions_data = await get_user_attentions(uid)
+    attentions = [data['mid'] for data in attentions_data]
     follows_num = int(user_info["attention"])
-    if not attentions and follows_num:
-        await matcher.finish("获取用户关注列表失败，关注列表可能未公开")
+    
+    if not attentions and follows_num > 0:
+        await matcher.finish("获取用户关注列表失败，关注列表可能未公开或Cookie权限不足")
 
     vtb_list = await get_vtb_list()
     if not vtb_list:
@@ -83,9 +101,33 @@ async def _(matcher: Matcher, name: str):
         medal_list = []
 
     try:
-        result = await render_ddcheck_image(user_info, vtb_list, medal_list)
+        result = await render_ddcheck_image(user_info, vtb_list, attentions, medal_list)
     except Exception:
         logger.warning(traceback.format_exc())
         await matcher.finish("出错了，请稍后再试")
 
     await UniMessage.image(raw=result).send()
+
+@ddcheck_follows.handle()
+async def _(matcher: Matcher, name: str):
+    if name.isdigit():
+        uid = int(name)
+    else:
+        try:
+            uid = await get_uid_by_name(name)
+        except Exception:
+            logger.error(traceback.format_exc())
+            await matcher.finish("获取用户信息失败，请检查名称或使用uid查询")
+
+        if not uid:
+            await matcher.finish(f"未找到名为 {name} 的用户")
+    
+    # 直接获取关注列表，包含用户名和UID
+    attentions_data = await get_user_attentions(uid)
+    
+    if not attentions_data:
+        await matcher.finish("获取关注列表失败，可能关注列表未公开或Cookie权限不足。")
+    
+    # 将列表格式化为可读的字符串
+    follow_list_str = "\n".join([f"{data['uname']} (UID: {data['mid']})" for data in attentions_data])
+    await matcher.finish(f"用户 {name} 的关注列表如下：\n{follow_list_str}")
