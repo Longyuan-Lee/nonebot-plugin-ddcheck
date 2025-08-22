@@ -171,44 +171,40 @@ async def get_vtb_list() -> list[dict]:
         await update_vtb_list()
     return load_vtb_list()
 
+async def fetch_api(url: str, params: dict, timeout: int = 10, cookies: dict = None) -> Optional[dict]:
+    """通用的API请求函数"""
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.get(url, params=params, headers=HEADERS, cookies=cookies)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"API请求失败: {e}")
+            return None
+
 async def get_uid_by_name(name: str) -> Optional[int]:
     """通过用户名获取UID"""
     await get_wbi_keys()
-    
     url = "https://api.bilibili.com/x/web-interface/wbi/search/type"
     params = {"search_type": "bili_user", "keyword": name}
-    params_signed = get_wbi_sign_params(params)
+    result = await fetch_api(url, get_wbi_sign_params(params), cookies=cookies)
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            resp = await client.get(url, params=params_signed, headers=HEADERS, cookies=cookies)
-            resp.raise_for_status()
-            result = resp.json()
-
-            if result["code"] == 0 and result["data"] and result["data"]["result"]:
-                for user in result["data"]["result"]:
-                    if user["uname"] == name:
-                        return user["mid"]
-                logger.warning(f"搜索用户 '{name}' 成功，但未找到精确匹配项。")
-            else:
-                logger.error(f"API请求失败: {result.get('message', '未知错误')}")
-        except Exception as e:
-            logger.error(f"通过用户名获取UID失败: {e}")
+    if result and result.get("code") == 0 and result.get("data") and result["data"].get("result"):
+        for user in result["data"]["result"]:
+            if user["uname"] == name:
+                return user["mid"]
+        logger.warning(f"搜索用户 '{name}' 成功，但未找到精确匹配项。")
     return None
 
 async def get_user_info(uid: int) -> dict:
     """通过UID获取用户基本信息"""
     url = "https://api.bilibili.com/x/web-interface/card"
     params = {"mid": uid}
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, params=params, headers=HEADERS)
-        result = resp.json()
+    result = await fetch_api(url, params)
 
-        if result.get("code") == 0 and "data" in result:
-            return result["data"]["card"]
-        else:
-            message = result.get("message", "无法从 API 获取用户信息。")
-            raise ConnectionError(message)
+    if result and result.get("code") == 0 and "data" in result:
+        return result["data"].get("card", {})
+    raise ConnectionError(result.get("message", "无法从 API 获取用户信息。"))
 
 async def get_user_attentions(uid: int) -> list[dict]:
     """使用WBI签名API获取完整的关注列表，返回包含用户名和UID的列表"""
@@ -216,55 +212,42 @@ async def get_user_attentions(uid: int) -> list[dict]:
     attentions_data = []
     page = 1
     page_size = 50
-    try:
-        await get_wbi_keys()
-        
-        async with httpx.AsyncClient(timeout=30) as client:
-            while True:
-                params = {
-                    "vmid": uid,
-                    "pn": page,
-                    "ps": page_size,
-                    "order": "desc",
-                    "jsonp": "jsonp"
-                }
-                
-                params_signed = get_wbi_sign_params(params)
-                url = "https://api.bilibili.com/x/relation/followings"
-                
-                resp = await client.get(url, params=params_signed, headers=HEADERS, cookies=cookies)
-                resp.raise_for_status()
-                
-                data = resp.json()["data"]
-                
-                if data["list"]:
-                    for user in data["list"]:
-                        # 核心修改：返回包含'uname'和'mid'的字典
-                        attentions_data.append({"mid": user["mid"], "uname": user["uname"]})
-                    
-                    if len(data["list"]) < page_size:
-                        break
-                    page += 1
-                else:
-                    break
 
-        logger.info(f"成功通过WBI签名API获取 {len(attentions_data)} 个关注者。")
-        return attentions_data
+    await get_wbi_keys()
+    url = "https://api.bilibili.com/x/relation/followings"
 
-    except Exception as e:
-        logger.error(f"通过WBI签名API获取失败，请检查您的Cookie或等待Bilibili API更新。错误：{e}")
-        return []
+    while True:
+        params = {
+            "vmid": uid,
+            "pn": page,
+            "ps": page_size,
+            "order": "desc",
+            "jsonp": "jsonp",
+        }
+        result = await fetch_api(url, get_wbi_sign_params(params), timeout=30, cookies=cookies)
+
+        if result and result.get("data") and result["data"].get("list"):
+            attentions_data.extend(
+                {"mid": user["mid"], "uname": user["uname"]} for user in result["data"]["list"]
+            )
+            if len(result["data"]["list"]) < page_size:
+                break
+            page += 1
+        else:
+            break
+
+    logger.info(f"成功通过WBI签名API获取 {len(attentions_data)} 个关注者。")
+    return attentions_data
 
 async def get_medal_list(uid: int) -> list[dict]:
     """获取粉丝勋章列表"""
     url = "https://api.live.bilibili.com/xlive/web-ucenter/user/MedalWall"
     params = {"target_id": uid}
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, params=params, headers=HEADERS, cookies=cookies)
-        result = resp.json()
-        if result.get("code") == 0 and result.get("data"):
-            return result["data"]["list"]
-        return []
+    result = await fetch_api(url, params, cookies=cookies)
+
+    if result and result.get("code") == 0 and result.get("data"):
+        return result["data"].get("list", [])
+    return []
 
 def format_color(color: int) -> str:
     return f"#{color:06X}"
